@@ -289,9 +289,9 @@ def _fallback_chat(question, patient_context):
 
 def _gemini_chat(question, patient_context):
     api_key = os.environ.get("GEMINI_API_KEY")
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     if not api_key:
-        return _fallback_chat(question, patient_context), False
+        return _fallback_chat(question, patient_context), False, "missing_api_key"
 
     prompt = (
         "You are a supportive heart health assistant inside a preventive care dashboard. "
@@ -307,11 +307,14 @@ def _gemini_chat(question, patient_context):
         }
     ).encode("utf-8")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     req = urlrequest.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
         method="POST",
     )
 
@@ -319,9 +322,21 @@ def _gemini_chat(question, patient_context):
         with urlrequest.urlopen(req, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8"))
             text = payload["candidates"][0]["content"]["parts"][0]["text"]
-            return text, True
-    except (KeyError, IndexError, error.URLError, TimeoutError, json.JSONDecodeError):
-        return _fallback_chat(question, patient_context), False
+            return text, True, None
+    except error.HTTPError as exc:
+        try:
+            details = exc.read().decode("utf-8")
+        except Exception:  # pragma: no cover
+            details = str(exc)
+        return _fallback_chat(question, patient_context), False, f"http_error:{exc.code}:{details}"
+    except error.URLError as exc:
+        return _fallback_chat(question, patient_context), False, f"url_error:{exc.reason}"
+    except TimeoutError:
+        return _fallback_chat(question, patient_context), False, "timeout"
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        return _fallback_chat(question, patient_context), False, f"response_parse_error:{exc}"
+    except Exception as exc:  # pragma: no cover
+        return _fallback_chat(question, patient_context), False, f"unexpected_error:{exc}"
 
 
 @app.after_request
@@ -381,13 +396,15 @@ def chat():
     if not question:
         return jsonify({"error": "Question is required."}), 400
 
-    answer, live_model = _gemini_chat(question, patient_context)
-    return jsonify(
-        {
-            "answer": answer,
-            "source": "gemini" if live_model else "local-fallback",
-        }
-    )
+    answer, live_model, debug_reason = _gemini_chat(question, patient_context)
+    response = {
+        "answer": answer,
+        "source": "gemini" if live_model else "local-fallback",
+    }
+    debug_mode = os.environ.get("FLASK_DEBUG", "true").lower() == "true"
+    if debug_mode:
+        response["debug_reason"] = debug_reason
+    return jsonify(response)
 
 
 if __name__ == "__main__":
