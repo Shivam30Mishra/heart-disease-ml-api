@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+frontend/build/
+frontend/node_modules/
+node_modules/
